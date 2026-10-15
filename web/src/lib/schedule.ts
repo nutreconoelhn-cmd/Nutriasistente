@@ -1,8 +1,8 @@
 export type ScheduleDay = {
   date: string; status: string; city: string; address: string | null;
-  start_time: string | null; end_time: string | null; modality: string;
+  start_time: string | null; end_time: string | null; modality: string; slot_times?: string[] | null;
 };
-export type WeeklyHours = { day_of_week: number; start_time: string; end_time: string; modality: string; active?: boolean };
+export type WeeklyHours = { day_of_week: number; start_time: string; end_time: string; modality: string; active?: boolean; slot_start_only?: boolean };
 
 export const defaultAddress = "Hospital del Valle, Condominio 2, Consultorio 303";
 export const hondurasDate = (at = new Date()) => new Intl.DateTimeFormat("en-CA", {
@@ -31,6 +31,13 @@ export function hoursFor(date: string, modality: string, weekly: WeeklyHours[], 
   if (override) {
     if (override.status !== "open" || !override.start_time || !override.end_time
       || ![modality, "ambas"].includes(override.modality)) return [];
+    if (override.slot_times != null) {
+      return [...new Set(override.slot_times.map(time => time.slice(0,5)))].sort().filter(time => /^(?:0[89]|1[0-5]):(?:00|30)$/.test(time) && time <= "15:00").map(time => {
+        const [h,m]=time.split(":").map(Number);
+        const end=`${String(h+1).padStart(2,"0")}:${String(m).padStart(2,"0")}`;
+        return {day_of_week:weekday(date)||7,start_time:time,end_time:end,modality:override.modality,slot_start_only:true};
+      });
+    }
     return [{ day_of_week: weekday(date) || 7, start_time: override.start_time, end_time: override.end_time, modality: override.modality }];
   }
   if (weekday(date) === 0 || weekday(date) === 6) return [];
