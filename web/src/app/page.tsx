@@ -1,137 +1,22 @@
 "use client";
-
 import { useState, type FormEvent } from "react";
-import { createBrowserClient } from "@supabase/ssr";
+import { useRouter } from "next/navigation";
+import { browserDb } from "../lib/supabase-browser";
 
 export default function Home() {
-  const [mensaje, setMensaje] = useState("");
-  const [cargando, setCargando] = useState(false);
-
-  async function ingresar(event: FormEvent<HTMLFormElement>) {
+  const router = useRouter();
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+  async function login(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setCargando(true);
-    setMensaje("");
-
-    const datos = new FormData(event.currentTarget);
-
+    const form = new FormData(event.currentTarget);
+    setBusy(true); setMessage("");
     try {
-      const url = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
-      const clave =
-        process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY?.trim();
-
-      if (!url || !clave) {
-        throw new Error(
-          "Faltan las variables de Supabase. Comprueba que .env.local esté dentro de web y reinicia el servidor."
-        );
-      }
-
-      let direccion: URL;
-
-      try {
-        direccion = new URL(url);
-      } catch {
-        throw new Error(
-          "La URL de Supabase no es válida. Copia la URL del proyecto completa, comenzando con https://."
-        );
-      }
-
-      if (direccion.protocol !== "https:") {
-        throw new Error(
-          "La URL de Supabase debe comenzar con https://."
-        );
-      }
-
-      const supabase = createBrowserClient(url, clave);
-
-      const { error } = await supabase.auth.signInWithPassword({
-        email: String(datos.get("email") ?? "").trim(),
-        password: String(datos.get("password") ?? ""),
-      });
-
-      if (error) {
-        if (error.code === "invalid_credentials") {
-          setMensaje("Revisa tu correo y contraseña.");
-        } else if (/fetch|network/i.test(error.message)) {
-          setMensaje(
-            "No se pudo contactar con Supabase. Revisa la URL del proyecto y confirma que el proyecto esté activo."
-          );
-        } else {
-          setMensaje("No se pudo iniciar sesión: " + error.message);
-        }
-
-        return;
-      }
-
-      setMensaje("✅ Sesión iniciada. La conexión funciona.");
-    } catch (error) {
-      setMensaje(
-        error instanceof Error
-          ? error.message
-          : "No se pudo identificar el error."
-      );
-    } finally {
-      setCargando(false);
-    }
+      const { error } = await browserDb().auth.signInWithPassword({email: String(form.get("email") ?? "").trim(), password: String(form.get("password") ?? "")});
+      if (error) { setMessage(error.code === "invalid_credentials" ? "Revisa tu correo y contraseña." : error.message); return; }
+      router.replace("/panel");
+    } catch (error) { setMessage(error instanceof Error ? error.message : "No se pudo iniciar sesión."); }
+    finally { setBusy(false); }
   }
-
-  return (
-    <main className="flex min-h-screen items-center justify-center bg-slate-50 p-6 text-slate-900">
-      <section className="w-full max-w-md rounded-3xl border border-slate-200 bg-white p-8 shadow-sm">
-        <p className="font-semibold text-emerald-700">
-          🥗 Nutriasistente
-        </p>
-
-        <h1 className="mt-4 text-3xl font-bold">
-          Bienvenido, Noel
-        </h1>
-
-        <p className="mt-2 text-slate-500">
-          Ingresa para administrar tu consultorio.
-        </p>
-
-        <form onSubmit={ingresar} className="mt-8 space-y-5">
-          <label className="block text-sm font-medium">
-            Correo electrónico
-            <input
-              name="email"
-              type="email"
-              autoComplete="username"
-              required
-              disabled={cargando}
-              className="mt-2 w-full rounded-xl border border-slate-300 p-3 outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-100"
-            />
-          </label>
-
-          <label className="block text-sm font-medium">
-            Contraseña
-            <input
-              name="password"
-              type="password"
-              autoComplete="current-password"
-              required
-              disabled={cargando}
-              className="mt-2 w-full rounded-xl border border-slate-300 p-3 outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-100"
-            />
-          </label>
-
-          <button
-            type="submit"
-            disabled={cargando}
-            className="w-full rounded-xl bg-emerald-700 p-3 font-semibold text-white hover:bg-emerald-800 disabled:opacity-60"
-          >
-            {cargando ? "Ingresando…" : "Iniciar sesión"}
-          </button>
-        </form>
-
-        {mensaje && (
-          <p
-            role="status"
-            className="mt-5 rounded-xl bg-slate-100 p-4 text-sm leading-6"
-          >
-            {mensaje}
-          </p>
-        )}
-      </section>
-    </main>
-  );
+  return <main className="flex min-h-screen items-center justify-center bg-slate-50 p-6 text-slate-900"><section className="w-full max-w-md rounded-3xl border border-slate-200 bg-white p-8 shadow-sm"><p className="font-semibold text-emerald-700">🥗 Nutriasistente</p><h1 className="mt-5 text-3xl font-bold">Bienvenido, Noel</h1><p className="mt-2 text-slate-500">Tu consultorio, en un solo lugar.</p><form onSubmit={login} className="mt-8 space-y-5"><label className="block text-sm font-medium">Correo electrónico<input name="email" type="email" autoComplete="username" required disabled={busy} className="mt-2 w-full rounded-xl border border-slate-300 p-3"/></label><label className="block text-sm font-medium">Contraseña<input name="password" type="password" autoComplete="current-password" required disabled={busy} className="mt-2 w-full rounded-xl border border-slate-300 p-3"/></label><button disabled={busy} className="w-full rounded-xl bg-emerald-700 p-3 font-semibold text-white disabled:opacity-50">{busy ? "Ingresando…" : "Entrar al consultorio"}</button></form>{message && <p role="alert" className="mt-5 rounded-xl bg-amber-50 p-4 text-sm text-amber-900">{message}</p>}</section></main>;
 }
