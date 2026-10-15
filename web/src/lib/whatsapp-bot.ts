@@ -215,7 +215,13 @@ export async function handleWhatsappMessage(db: SupabaseClient, message: Incomin
   if (["date", "reschedule_date", "time", "reschedule_time"].includes(session.step)) {
     const listed: string[] = JSON.parse(session.details.choices ?? "[]");
     const isDate = session.step === "date" || session.step === "reschedule_date";
-    const other = /\b(otra fecha|otro dia|otro horario|otra hora|ninguna fecha|no me sirven)\b/.test(value)
+    const typedDate=isDate?appointmentDate(input,localDate(new Date())):null;
+    if(typedDate&&!listed.includes(typedDate)) {
+      if(new Date(`${typedDate}T12:00:00Z`).getUTCDay()===6||Date.parse(`${typedDate}T12:00:00Z`)>Date.now()+730*86400000)return "📅 Podemos revisar otra fecha de domingo a viernes. Escribe una fecha válida; los sábados no hay atención.";
+      await save(db,from,"alternate_city",{...session.details,manualAlternative:"true",manualSunday:"",altType:session.details.appointmentId?"reprogramacion":"nueva",date:typedDate,requestedDate:typedDate});
+      return `🗓️ *Fecha propuesta: ${longDate(typedDate)}*\n\n⏳ Esta fecha requiere aceptación del consultorio; todavía no es una cita confirmada.\n\n📍 ¿En qué ciudad deseas la consulta?\n\n1️⃣ San Pedro Sula\n2️⃣ Santa Bárbara\n\n💬 Elige una opción o escribe la ciudad.${backHint}`;
+    }
+    const other = /\b(otra fecha|otra|otro dia|otro horario|otra hora|ninguna fecha|no me sirven)\b/.test(value)
       || isDate && choiceNumber(input, listed.length + 1) === listed.length + 1;
     if (other) {
       await save(db, from, "alternate_date", {...session.details, manualAlternative:"true", manualSunday:"", altType:session.details.appointmentId?"reprogramacion":"nueva"});
@@ -477,7 +483,7 @@ export async function handleWhatsappMessage(db: SupabaseClient, message: Incomin
     const dateChoice = choiceNumber(input, choices.length);
     const spokenDate = appointmentDate(input, localDate(new Date()));
     const date = dateChoice ? choices[dateChoice - 1] : spokenDate;
-    if (!date || !choices.includes(date) || !available.includes(date)) return `📅 Esa fecha no está en la lista o ya no está disponible. Responde con un número, una fecha de la lista o escribe *ATRÁS*.`;
+    if (!date || !choices.includes(date) || !available.includes(date)) return `📅 No pude seleccionar esa fecha. Elige una opción de la lista o escribe *OTRA FECHA* para proponer una pendiente de aceptación.`;
     const list = await services(db);
     const service = list.find((s) => s.id === session.details.serviceId);
     if (!service) { await save(db, from, "menu", {}); return "📋 Ese servicio ya no está disponible. Escribe 1 para iniciar de nuevo."; }
