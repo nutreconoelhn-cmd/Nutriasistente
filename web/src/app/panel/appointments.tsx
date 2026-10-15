@@ -1,0 +1,44 @@
+"use client";
+import {useRef,useState} from "react";
+export type Appointment={appointment_id:string;patient_name:string;patient_phone:string|null;patient_email?:string|null;service_name:string;appointment_date:string;appointment_end:string;modality:string;appointment_status:string;payment_status:string|null;payment_amount?:number|null;payment_currency?:string|null};
+const statusNames:Record<string,string>={pending:"Pendiente de confirmar",confirmed:"Confirmada",completed:"Atendida",no_show:"No asistió",cancelled:"Cancelada",canceled:"Cancelada",paid:"Pagado",approved:"Aprobado",verified:"Verificado",rejected:"Rechazado"};
+function day(value:string){return new Intl.DateTimeFormat("en-CA",{timeZone:"America/Tegucigalpa",year:"numeric",month:"2-digit",day:"2-digit"}).format(new Date(value));}
+function date(value:string){return new Intl.DateTimeFormat("es-HN",{timeZone:"America/Tegucigalpa",weekday:"long",day:"numeric",month:"long",year:"numeric"}).format(new Date(value));}
+function time(value:string){return new Intl.DateTimeFormat("es-HN",{timeZone:"America/Tegucigalpa",hour:"numeric",minute:"2-digit",hour12:true}).format(new Date(value));}
+function badgeClass(status:string){return ["confirmed","completed","paid","approved","verified"].includes(status)?"bg-emerald-50 text-emerald-800":["cancelled","canceled","no_show","rejected"].includes(status)?"bg-rose-50 text-rose-800":"bg-amber-50 text-amber-900";}
+function downloadCalendar(item:Appointment){
+ const stamp=(value:string)=>new Date(value).toISOString().replace(/[-:]/g,"").replace(/\.\d{3}/,"");
+ const safe=(value:string)=>value.replace(/\\/g,"\\\\").replace(/\r?\n/g,"\\n").replace(/,/g,"\\,").replace(/;/g,"\\;");
+ const event=["BEGIN:VCALENDAR","VERSION:2.0","PRODID:-//Nutriasistente//Citas//ES","BEGIN:VEVENT",`UID:${item.appointment_id}@nutriasistente`,`DTSTAMP:${stamp(new Date().toISOString())}`,`DTSTART:${stamp(item.appointment_date)}`,`DTEND:${stamp(item.appointment_end)}`,`SUMMARY:${safe(item.service_name+" - "+item.patient_name)}`,`DESCRIPTION:${safe(item.modality==="online"?"Consulta en línea":"Consulta presencial")}`,"END:VEVENT","END:VCALENDAR",""].join("\r\n");
+ const url=URL.createObjectURL(new Blob([event],{type:"text/calendar;charset=utf-8"}));
+ const link=document.createElement("a");link.href=url;link.download=`cita-${item.appointment_id}.ics`;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
+export default function Appointments({items,nowIso,onChanged}:{items:Appointment[];nowIso:string;onChanged:()=>Promise<void>}){
+ const [selectedDate,setSelectedDate]=useState("");const [selectedStatus,setSelectedStatus]=useState("");const [modality,setModality]=useState("");
+ const [period,setPeriod]=useState("all");const [busy,setBusy]=useState("");const [message,setMessage]=useState("");const lock=useRef(false);
+ const now=Date.parse(nowIso);const today=nowIso?day(nowIso):"";
+ const visible=items.filter(a=>(!selectedDate||day(a.appointment_date)===selectedDate)&&(!selectedStatus||a.appointment_status===selectedStatus)&&(!modality||a.modality===modality)&&(period!=="today"||day(a.appointment_date)===today)&&(period!=="upcoming"||Date.parse(a.appointment_date)>=now&&["pending","confirmed"].includes(a.appointment_status))).sort((a,b)=>period==="all"?Date.parse(b.appointment_date)-Date.parse(a.appointment_date):Date.parse(a.appointment_date)-Date.parse(b.appointment_date));
+ async function mark(item:Appointment,action:"attended"|"no_show"){
+  if(lock.current)return;
+  if(!window.confirm(`¿Registrar que ${item.patient_name} ${action==="attended"?"fue atendido/a":"no asistió"}? Es un cambio interno y no modifica su pago.`))return;
+  lock.current=true;setBusy(item.appointment_id);setMessage("");
+  try{const response=await fetch("/api/appointments",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({appointmentId:item.appointment_id,action})});const result=await response.json();
+   if(!response.ok){setMessage(result.error||"No se pudo guardar el cambio. Actualiza antes de reintentar.");return;}
+   setMessage(result.message);await onChanged();
+  }catch{setMessage("No se pudo confirmar el resultado. Actualiza el panel y revisa el estado antes de repetir.");}finally{lock.current=false;setBusy("");}
+ }
+ const field="mt-2 w-full rounded-xl border border-slate-300 bg-white p-3";
+ const button="rounded-xl border border-slate-200 px-4 py-2 text-sm font-semibold disabled:opacity-50";
+ return <div>
+  <div className="mb-5 flex flex-wrap gap-2">{[{id:"all",label:"Todas"},{id:"today",label:"Hoy"},{id:"upcoming",label:"Próximas"}].map(p=><button key={p.id} aria-pressed={period===p.id} onClick={()=>{setPeriod(p.id);setSelectedDate("");}} className={button+(period===p.id?" border-emerald-700 bg-emerald-700 text-white":" bg-white text-slate-600")}>{p.label}</button>)}</div>
+  <div className="mb-5 grid gap-4 sm:grid-cols-3"><label className="text-sm font-medium">Fecha<input type="date" value={selectedDate} onChange={e=>{setSelectedDate(e.target.value);setPeriod("all");}} className={field}/></label><label className="text-sm font-medium">Estado<select value={selectedStatus} onChange={e=>setSelectedStatus(e.target.value)} className={field}><option value="">Todos</option><option value="pending">Pendientes</option><option value="confirmed">Confirmadas</option><option value="completed">Atendidas</option><option value="no_show">No asistió</option><option value="cancelled">Canceladas</option></select></label><label className="text-sm font-medium">Modalidad<select value={modality} onChange={e=>setModality(e.target.value)} className={field}><option value="">Todas</option><option value="presencial">Presencial</option><option value="online">En línea</option></select></label></div>
+  <div className="mb-5 flex flex-wrap items-center justify-between gap-3"><p className="text-sm text-slate-500">{visible.length} citas en esta selección</p><button onClick={()=>{setSelectedDate("");setSelectedStatus("");setModality("");setPeriod("all");}} className="text-sm font-semibold text-emerald-700">Limpiar filtros</button></div>
+  <div aria-live="polite">{message&&<p className="mb-5 rounded-xl bg-slate-100 p-4 text-sm leading-6">{message}</p>}</div>
+  <div className="space-y-4">{visible.length===0?<p className="py-8 text-center text-slate-500">No hay citas que coincidan con los filtros.</p>:visible.map(a=>{
+   const started=Date.parse(a.appointment_date)<=now;const ended=Date.parse(a.appointment_end)<=now;
+   const canMark=["confirmed","completed","no_show"].includes(a.appointment_status);
+   return <article key={a.appointment_id} className="rounded-2xl border border-slate-200 p-5"><div className="flex flex-wrap justify-between gap-3"><div><h3 className="text-lg font-semibold">{a.patient_name}</h3><p className="mt-1 text-sm text-slate-600">{a.service_name}</p></div><span className={`h-fit rounded-full px-3 py-1 text-xs font-semibold ${badgeClass(a.appointment_status)}`}>{statusNames[a.appointment_status]||a.appointment_status}</span></div><div className="mt-4 grid gap-4 text-sm sm:grid-cols-2"><div><p className="capitalize">📅 {date(a.appointment_date)}</p><p className="mt-2">🕐 {time(a.appointment_date)} – {time(a.appointment_end)}</p><p className="mt-2">{a.modality==="online"?"💻 En línea":"🏥 Presencial"}</p></div><div className="text-slate-600"><p>📞 {a.patient_phone||"Sin teléfono"}</p><p className="mt-2 break-all">✉️ {a.patient_email||"Sin correo"}</p><p className="mt-2">💳 Pago: {a.payment_status?statusNames[a.payment_status]||a.payment_status:"Sin registro"}</p></div></div><div className="mt-5 flex flex-wrap gap-2 border-t border-slate-100 pt-4"><button onClick={()=>downloadCalendar(a)} className={button}>📅 Descargar para calendario</button>{canMark&&started&&a.appointment_status!=="completed"&&<button disabled={Boolean(busy)} onClick={()=>void mark(a,"attended")} className={button+" bg-emerald-700 text-white"}>Marcar atendida</button>}{canMark&&ended&&a.appointment_status!=="no_show"&&<button disabled={Boolean(busy)} onClick={()=>void mark(a,"no_show")} className={button+" text-rose-700"}>No asistió</button>}</div>{a.appointment_status==="pending"&&<p className="mt-3 text-xs text-slate-500">La confirmación se gestiona desde Pagos pendientes, después de revisar el comprobante.</p>}{a.appointment_status==="confirmed"&&!started&&<p className="mt-3 text-xs text-slate-500">La asistencia se habilita al comenzar la cita. Actualiza el panel cuando llegue la hora.</p>}{busy===a.appointment_id&&<p role="status" className="mt-3 text-sm text-slate-500">Guardando asistencia…</p>}</article>;
+  })}</div>
+  <p className="mt-5 text-xs leading-6 text-slate-500">La hora corresponde a Honduras. Marcar asistencia no envía WhatsApp ni modifica pagos o depósitos. Después de finalizar el horario puedes corregir la asistencia usando la otra opción.</p>
+ </div>;
+}
