@@ -3,6 +3,7 @@ import { appointmentDate, appointmentTime, binaryAnswer, choiceNumber, menuInten
 import { currentBookingDates, hoursFor, placeFor, type ScheduleDay } from "@/lib/schedule";
 import { setConversationMode } from "@/lib/whatsapp-inbox";
 import { metaAccessToken } from "@/lib/meta-access-token";
+import { appointmentLocation } from "@/lib/clinic-location";
 
 type Session = { step: string; details: Record<string, string> };
 type Incoming = { id: string; from: string; type: string; text?: { body?: string }; image?: { id?: string; mime_type?: string }; document?: { id?: string; mime_type?: string } };
@@ -140,16 +141,17 @@ async function scheduleDays(db: SupabaseClient, first: string, last?: string): P
     .eq("clinic_id", clinicId()).gte("date", first);
   return (await checked(last ? query.lte("date", last) : query.eq("date", first))) ?? [];
 }
-async function visitLocation(db: SupabaseClient, date: string, modality: string) {
+async function visitLocation(db: SupabaseClient, date: string, modality: string, startsAt?: string) {
+  if(startsAt) return appointmentLocation(db, startsAt, modality, clinicId());
   return placeFor(date, modality, await scheduleDays(db, date, date));
 }
 async function dateList(db: SupabaseClient, available: string[]) {
-  if (!available.length) return "";
+  if (!available.length) return "1️⃣ 🗓️ Otra fecha y horario (por confirmar)";
   const overrides = await scheduleDays(db, available[0], available.at(-1));
   return available.map((date, i) => {
     const special = overrides.find((row) => row.date === date && row.status === "open");
     return `${numberEmoji(i)} ${longDate(date)}${special ? ` · ${special.city}` : " · San Pedro Sula"}`;
-  }).join("\n");
+  }).join("\n") + `\n${numberEmoji(available.length)} 🗓️ Otra fecha y horario (por confirmar)`;
 }
 
 async function slots(db: SupabaseClient, date: string, modality: string, duration: number): Promise<Slot[]> {
@@ -210,6 +212,50 @@ export async function handleWhatsappMessage(db: SupabaseClient, message: Incomin
   const value = clean(input);
   const choice = yesNo(value);
   if (value === "menu" || value === "cancelar") { await save(db, from, "menu", {}); return welcome; }
+  if (["date", "reschedule_date", "time", "reschedule_time"].includes(session.step)) {
+    const listed: string[] = JSON.parse(session.details.choices ?? "[]");
+    const isDate = session.step === "date" || session.step === "reschedule_date";
+    const other = /\b(otra fecha|otro dia|otro horario|otra hora|ninguna fecha|no me sirven)\b/.test(value)
+      || isDate && choiceNumber(input, listed.length + 1) === listed.length + 1;
+    if (other) {
+      await save(db, from, "alternate_date", {...session.details, manualAlternative:"true", manualSunday:"", altType:session.details.appointmentId?"reprogramacion":"nueva"});
+      return `🗓️ *Solicitar otra fecha y horario*\n\nEscribe la fecha que prefieres en formato *DD/MM/AAAA*, por ejemplo *28/10/2026*.\n\n⏳ El consultorio debe revisar y aceptar la propuesta. Todavía no es una cita confirmada. Atendemos de domingo a viernes; los sábados no hay atención.${backHint}`;
+    }
+  }
+  if (session.step === "alternate_date" && value !== "atras") {
+    const date = appointmentDate(input, localDate(new Date()));
+    if (!date || new Date(`${date}T12:00:00Z`).getUTCDay() === 6 || Date.parse(`${date}T12:00:00Z`) > Date.now()+730*86400000) return "📅 Escribe una fecha futura válida de domingo a viernes, en formato *DD/MM/AAAA*.";
+    await save(db, from, "alternate_city", {...session.details, date, requestedDate:date});
+    return `📍 ¿En qué ciudad deseas la consulta?\n\n1️⃣ San Pedro Sula\n2️⃣ Santa Bárbara\n\n💬 Elige una opción o escribe la ciudad. El lugar exacto se confirma al aceptar la solicitud.${backHint}`;
+  }
+  if (session.step === "alternate_city" && value !== "atras") {
+    const option=choiceNumber(input,2);
+    const city=option===1?"San Pedro Sula":option===2?"Santa Bárbara":input;
+    if(city.length<2||city.length>100||/^\d+$/.test(city))return "📍 Elige *1* o *2*, o escribe el nombre de la ciudad.";
+    await save(db,from,"alternate_time",{...session.details,city});
+    return `🕐 Escribe la hora de inicio que prefieres para *${longDate(session.details.date)}*. Puedes escribir *9*, *9:30* o *2 pm*.\n\nNuestro horario habitual es de *8:00 a. m. a 4:00 p. m.*; el horario propuesto queda sujeto a aceptación.${backHint}`;
+  }
+  if (session.step === "alternate_time" && value !== "atras") {
+    const time=appointmentTime(input);
+    const service=(await services(db)).find(item=>item.id===session.details.serviceId);
+    if(!time||!service)return "🕐 Escribe una hora válida, como *9*, *9:30* o *2 pm*. Si cambió el servicio, escribe *MENÚ*.";
+    const start=localStamp(session.details.date,time),end=new Date(start.getTime()+(service.duration_minutes??60)*60000);
+    const endTime=new Intl.DateTimeFormat("en-GB",{timeZone:"America/Tegucigalpa",hour:"2-digit",minute:"2-digit",hour12:false}).format(end);
+    if(time<"08:00"||endTime>"16:00"||localDate(end)!==session.details.date||start.getTime()<Date.now()+15*60000)return "🕐 Propón una consulta que inicie después de ahora, desde las *8:00 a. m.* y termine a más tardar a las *4:00 p. m.*";
+    const details={...session.details,start:start.toISOString(),end:end.toISOString(),requestedTime:time,dateLabel:longDate(session.details.date),timeLabel:displayTime(start.toISOString())};
+    await save(db,from,session.details.altType==="reprogramacion"?"alternate_review":"name",details);
+    return session.details.altType==="reprogramacion"
+      ? `📋 *Revisa tu propuesta*\n\n📅 ${details.dateLabel}\n🕐 ${details.timeLabel}\n📍 ${session.details.city}\n\nTu cita original se mantiene hasta que el consultorio acepte. El cambio conserva el depósito solo si se solicita con al menos 24 horas de anticipación.\n\n1️⃣ ✅ Enviar solicitud\n2️⃣ ✏️ Cambiar fecha y hora\n\n💬 Responde *1* o *2*, también *SÍ* o *NO*.${menuHint}`
+      : `👤 *Datos del paciente*\n\nEscribe el nombre y apellido de quien recibirá la consulta. La fecha que propusiste todavía requiere aprobación.${menuHint}`;
+  }
+  if (session.step === "alternate_review" && value !== "atras") {
+    if(choice==="2"){await save(db,from,"alternate_date",session.details);return "📅 Escribe la nueva fecha en formato *DD/MM/AAAA*.";}
+    if(choice!=="1")return "💬 Responde *1* o *SÍ* para enviar; *2* o *NO* para corregir.";
+    const own=(await ownAppointments(db,from)).some(a=>a.id===session.details.appointmentId);
+    if(!own){await save(db,from,"menu",{});return "📅 Ya no encontré esa cita entre tus próximas reservas. Escribe *MENÚ* para revisar.";}
+    await saveRequest(db,from,"fecha_alternativa",{...session.details,message:"Solicitud de reprogramación en otra fecha",requestedAt:new Date().toISOString()});
+    return `⏳ *Solicitud enviada*\n\nEl consultorio revisará el cupo y te avisará por WhatsApp. Tu cita original no cambia hasta que recibas la aceptación.${menuHint}`;
+  }
   if (noNewAppointment.test(value) && session.step !== "human_write" && session.step !== "human_call") {
     if (session.step === "human_pending" && session.details.requestId) {
       await db.from("whatsapp_bot_requests").update({ status: "resolved" })
@@ -220,6 +266,14 @@ export async function handleWhatsappMessage(db: SupabaseClient, message: Incomin
     return `😊 Entiendo, no agendaremos otra cita. Si necesitas ayuda más adelante, aquí estaré. Puedes escribir *MENÚ* para ver las opciones o elegir *6* para hablar con el Lic. Noel.`;
   }
   if (value === "atras") {
+    if (["alternate_city","alternate_time","alternate_review"].includes(session.step) || session.step==="name"&&session.details.manualAlternative==="true") {
+      await save(db,from,"alternate_date",session.details);return `📅 Escribe otra fecha en formato *DD/MM/AAAA*.${menuHint}`;
+    }
+    if(session.step==="alternate_date") {
+      const available=await dates(db,session.details.modality);
+      await save(db,from,session.details.altType==="reprogramacion"?"reschedule_date":"date",{...session.details,manualAlternative:"",choices:JSON.stringify(available)});
+      return `📅 *Fechas disponibles*\n\n${await dateList(db,available)}${menuHint}`;
+    }
     if (session.step === "sunday_time") {
       const available = await dates(db, session.details.modality);
       await save(db, from, "date", { ...session.details, manualSunday: "", choices: JSON.stringify(available) });
@@ -280,11 +334,12 @@ export async function handleWhatsappMessage(db: SupabaseClient, message: Incomin
   }
   if (session.step === "human_pending") {
     if (input.length > 1000) return "💬 Envía un mensaje más corto, por favor.";
-    const updated = { ...session.details, message: input, requestedAt: new Date().toISOString() };
+    const updated = { ...session.details, message: input, requestedAt: session.details.requestedAt || new Date().toISOString(), lastMessageAt: new Date().toISOString() };
     if (session.details.requestId) {
-      const { error } = await db.from("whatsapp_bot_requests").update({ details: updated })
-        .eq("id", session.details.requestId).eq("clinic_id", clinicId()).eq("status", "pending");
+      const { data: pending, error } = await db.from("whatsapp_bot_requests").update({ details: updated })
+        .eq("id", session.details.requestId).eq("clinic_id", clinicId()).eq("status", "pending").select("id").maybeSingle();
       if (error) throw new Error(error.message);
+      if (!pending) return "💬 El consultorio ya actualizó tu solicitud. Revisa el mensaje de confirmación o escribe *MENÚ* para consultar tu reserva.";
     }
     await save(db, from, "human_pending", updated);
     return "✅ Agregué tu último mensaje a la solicitud para el Lic. Noel. Escribe MENÚ para volver a las opciones.";
@@ -347,13 +402,13 @@ export async function handleWhatsappMessage(db: SupabaseClient, message: Incomin
         ? "Aprobado" : payment?.status === "rejected" ? "Comprobante no aprobado; puedes enviar otro aquí mismo"
           : payment?.receipt_uploaded_at ? "Comprobante recibido; pendiente de revisión"
             : payment?.status === "pending" ? "Pendiente de comprobante" : "Consulta al consultorio";
-      return `📋 *Tu reserva*\n\n👤 ${title}\n🏥 Modalidad: ${selected.modality === "online" ? "En línea" : "Presencial"}\n${await visitLocation(db, localDate(new Date(selected.starts_at)), selected.modality)}\n📌 Estado: ${selected.status === "confirmed" ? "Confirmada" : "Pendiente"}\n💳 Anticipo: ${paymentStatus}.${needsReceipt ? payment.status === "rejected" ? "\n\n📎 No necesitas volver a pagar. Envía ahora una foto clara o PDF del comprobante para revisarlo otra vez." : "\n\n📎 Si ya depositaste, envía ahora la foto o PDF del comprobante (L 600)." : ""}${menuHint}`;
+      return `📋 *Tu reserva*\n\n👤 ${title}\n🏥 Modalidad: ${selected.modality === "online" ? "En línea" : "Presencial"}\n${await visitLocation(db, localDate(new Date(selected.starts_at)), selected.modality, selected.starts_at)}\n📌 Estado: ${selected.status === "confirmed" ? "Confirmada" : "Pendiente"}\n💳 Anticipo: ${paymentStatus}.${needsReceipt ? payment.status === "rejected" ? "\n\n📎 No necesitas volver a pagar. Envía ahora una foto clara o PDF del comprobante para revisarlo otra vez." : "\n\n📎 Si ya depositaste, envía ahora la foto o PDF del comprobante (L 600)." : ""}${menuHint}`;
     }
     await save(db, from, "appointment_request", { action: session.details.action, appointmentId: selected.id, appointmentTitle: title });
     if (session.details.action === "reprogramar") {
       const available = await dates(db, selected.modality);
       await save(db, from, "reschedule_date", { action: "reprogramar", appointmentId: selected.id, appointmentTitle: title, modality: selected.modality, choices: JSON.stringify(available), serviceId: selected.service_id ?? "" });
-      return `📅 *Nueva fecha disponible esta semana*\n\n${available.length ? await dateList(db, available) : "No quedan fechas disponibles en esta modalidad. El calendario se actualizará la próxima semana."}\n\nElige una opción de la lista. Si tenías un depósito aprobado, se conserva cuando solicitas el cambio con al menos *24 horas de anticipación*.${menuHint}`;
+      return `📅 *Nueva fecha disponible esta semana*\n\n${await dateList(db, available)}\n\nElige una opción de la lista. Si tenías un depósito aprobado, se conserva cuando solicitas el cambio con al menos *24 horas de anticipación*.${menuHint}`;
     }
     return `📝 *Solicitud para cancelar una cita*\n\n📅 ${title}\n\n${new Date(selected.starts_at).getTime() - Date.now() >= 24 * 3600000 ? "⏰ Si avisas al menos 24 horas antes, puedes reprogramar y aprovechar el depósito aprobado en una nueva fecha, según disponibilidad. El depósito no se devuelve." : "⏰ Faltan menos de 24 horas. Si cancelas ahora, el depósito no se devuelve ni se puede usar en otra cita."}\n\nTu cita seguirá vigente hasta que confirmemos la cancelación.\n\n1️⃣ ✅ Enviar solicitud\n2️⃣ ↩️ Volver al menú\n\n💬 Responde *1* o *2* (también puedes responder SÍ o NO).`;
   }
@@ -410,10 +465,10 @@ export async function handleWhatsappMessage(db: SupabaseClient, message: Incomin
     if (!modality) return `📍 Responde *1* o *presencial*, o *2* o *en línea*.${backHint}`;
     const available = await dates(db, modality);
     if (!available.length) {
-      await save(db, from, "date", { ...session.details, modality, choices: "[]" });
-      return `📅 No quedan fechas disponibles para esta semana en esa modalidad. El consultorio publica los días de atención de domingo a viernes. Escribe *MENÚ* para consultar después.${backHint}`;
+      await save(db, from, "date", { ...session.details, manualAlternative:"", modality, choices: "[]" });
+      return `📅 No quedan fechas disponibles esta semana en esa modalidad.\n\n${await dateList(db, [])}\n\n💬 Elige *1* para solicitar otra fecha, pendiente de aceptación.${backHint}`;
     }
-    await save(db, from, "date", { ...session.details, modality, choices: JSON.stringify(available) });
+    await save(db, from, "date", { ...session.details, manualAlternative:"", modality, choices: JSON.stringify(available) });
     return `📅 *Fechas disponibles esta semana*\n\n${await dateList(db, available)}\n\n💬 Elige una *opción* de la lista (por ejemplo, *1*) o escribe la fecha.${backHint}`;
   }
   if (session.step === "date") {
@@ -428,7 +483,7 @@ export async function handleWhatsappMessage(db: SupabaseClient, message: Incomin
     if (!service) { await save(db, from, "menu", {}); return "📋 Ese servicio ya no está disponible. Escribe 1 para iniciar de nuevo."; }
     const times = await slots(db, date, session.details.modality, service.duration_minutes ?? 60);
     if (!times.length) return "📅 Esa fecha se llenó. Elige otra fecha de la lista.";
-    await save(db, from, "time", { ...session.details, date, choices: JSON.stringify(times.map((slot) => slot.start)) });
+    await save(db, from, "time", { ...session.details, manualAlternative:"", manualSunday:"", date, choices: JSON.stringify(times.map((slot) => slot.start)) });
     return `🕐 *Horarios disponibles*\n\n📅 ${longDate(date)}\n${await visitLocation(db, date, session.details.modality)}\n\n${times.map((slot, i) => `${numberEmoji(i)} ${displayTime(slot.start)}`).join("\n")}\n\n💬 Elige una *opción* de la lista (por ejemplo, *1*) o escribe la hora (por ejemplo, *9*).${backHint}`;
   }
   if (session.step === "sunday_time") {
@@ -494,6 +549,10 @@ export async function handleWhatsappMessage(db: SupabaseClient, message: Incomin
     if (choice !== "1") return "💬 Responde *1* o *SÍ* si los datos son correctos; *2* o *NO* para corregirlos.";
     const selected = (await services(db)).find((item) => item.id === session.details.serviceId);
     if (!selected) { await save(db, from, "menu", {}); return "📋 Ese servicio ya no está disponible. Escribe *MENÚ* para comenzar de nuevo."; }
+    if(session.details.manualAlternative==="true") {
+      await save(db,from,"confirm",session.details);
+      return `📋 *Revisa tu solicitud*\n\n👤 Paciente: ${session.details.name}\n🎂 Edad: ${patientAge(session.details.birth)}\n🩺 Servicio: ${selected.name}\n📍 Ciudad solicitada: ${session.details.city}\n🏥 Modalidad: ${session.details.modality==="online"?"En línea":"Presencial"}\n📅 ${longDate(session.details.date)}\n🕐 ${displayTime(session.details.start)}\n💰 Precio: ${money(selected.price,selected.currency)}\n\n⏳ Todavía no es una reserva. El consultorio debe aceptar el horario; no deposites hasta recibir las indicaciones.\n\n1️⃣ ✅ Enviar solicitud\n2️⃣ ✏️ Corregir datos\n\n💬 Responde *1* o *2*, también *SÍ* o *NO*.${menuHint}`;
+    }
     await save(db, from, "confirm", session.details);
     return `📋 *Revisa tu reserva*\n\n👤 Paciente: ${session.details.name}${session.details.guardian ? `\n👤 Responsable: ${session.details.guardian}` : ""}\n🎂 Edad: ${patientAge(session.details.birth)}\n📱 Contacto: ${session.details.contactPhone}\n🩺 Servicio: ${selected.name}\n${session.details.modality === "online" ? "💻" : "🏥"} Modalidad: ${session.details.modality === "online" ? "En línea" : "Presencial"}\n${await visitLocation(db, session.details.date, session.details.modality)}\n📅 Fecha: ${longDate(session.details.date)}\n🕐 Hora: ${displayTime(session.details.start)}\n💰 Precio: ${money(selected.price, selected.currency)}\n💳 Depósito necesario: *L 600 (50%)*\n\n¿Toda la información está correcta?\n\n1️⃣ ✅ *Sí, confirmar mi cita*\n2️⃣ ✏️ *No, quiero hacer un cambio*\n\n💬 Responde con *1* o *2*, o escribe *SÍ* o *NO*.${menuHint}`;
   }
@@ -529,6 +588,10 @@ export async function handleWhatsappMessage(db: SupabaseClient, message: Incomin
       return `✏️ *¿Qué deseas cambiar?*\n\n1️⃣ Servicio\n2️⃣ Modalidad\n3️⃣ Fecha\n4️⃣ Hora\n5️⃣ Datos del paciente\n\n💬 Responde con el número de la opción.${menuHint}`;
     }
     if (choice !== "1") return "💬 Responde *1* o *SÍ* para confirmar tu cita; *2* o *NO* para cambiar algún dato.";
+    if(session.details.manualAlternative==="true") {
+      await saveRequest(db,from,"fecha_alternativa",{...session.details,altType:"nueva",message:"Solicitud de nueva cita en fecha alternativa",requestedAt:new Date().toISOString()});
+      return `⏳ *Solicitud de otra fecha recibida*\n\nEl Lic. Noel revisará si hay cupo y te responderá por WhatsApp. Aún no hay una cita confirmada ni debes depositar. Si acepta, recibirás las indicaciones del anticipo.${menuHint}`;
+    }
     if (session.details.manualSunday === "true") {
       await saveRequest(db, from, "domingo", { ...session.details, message: `${session.details.name} solicita ${longDate(session.details.date)} a las ${displayTime(session.details.start)} (${session.details.modality})`, requestedAt: new Date().toISOString() });
       return `🗓️ *Solicitud de domingo recibida*\n\nAún no hay una cita ni se requiere depositar. El consultorio revisará el horario y te avisará por WhatsApp. Si lo aprueban, te enviaremos los datos para el anticipo de L 600.${menuHint}`;
