@@ -1,0 +1,3 @@
+export function consultationTips(modality?: string) {
+  return `🥗 *Para aprovechar tu consulta*\n\n📋 Ten a mano exámenes recientes, indicaciones médicas y una lista de medicamentos o suplementos que uses, si tienes.\n📝 Piensa en tus objetivos y cualquier duda que quieras conversar con el Lic. Noel.\n⏰ Procura estar listo/a unos 10 minutos antes.${modality === "online" ? "\n💻 Busca un lugar tranquilo y comprueba tu conexión a internet." : modality === "presencial" ? "\n🏥 Si es presencial, lleva tus documentos y resultados disponibles." : ""}\n\nNo necesitas comprar suplementos ni cambiar tu alimentación antes de la valoración.`;
+}
